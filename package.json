@@ -1,0 +1,18 @@
+{
+  "name": "mermaid-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Mermaid editor with live preview and PNG export — 100% on-device",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mermaid": "^11.6.0"
+  },
+  "devDependencies": {
+    "vite": "^6.2.0"
+  }
+}
