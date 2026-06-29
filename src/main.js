@@ -7,7 +7,7 @@ import {
   isFlowchartDiagram,
   resolveLayoutOptions,
 } from './edgeStyling.js';
-import { setupNodePositioning, teardownNodePositioning } from './nodePositioning.js';
+import { setupNodePositioning, teardownNodePositioning, stripPositioningEditorArtifacts } from './nodePositioning.js';
 import './style.css';
 
 const MAX_CHARS = 50_000;
@@ -17,6 +17,7 @@ const THEME_STORAGE_KEY = 'mermaid-studio-export-theme';
 const EDGE_LAYOUT_STORAGE_KEY = 'mermaid-studio-edge-layout';
 const BLOCK_LAYOUT_STORAGE_KEY = 'mermaid-studio-block-layout';
 const MANUAL_POSITIONS_STORAGE_KEY = 'mermaid-studio-manual-positions';
+const SUBGRAPH_RESIZE_STORAGE_KEY = 'mermaid-studio-subgraph-resize';
 const SPLIT_RATIO_STORAGE_KEY = 'mermaid-studio-split-ratio';
 const SOURCE_COLLAPSED_STORAGE_KEY = 'mermaid-studio-source-collapsed';
 const DEFAULT_THEME = 'dark';
@@ -184,6 +185,11 @@ function buildUi() {
         Position blocks
       </label>
 
+      <label class="checkbox-label" for="subgraph-resize" title="Show drag handles on subgraph boxes to resize them">
+        <input type="checkbox" id="subgraph-resize" disabled />
+        Resize subgraphs
+      </label>
+
       <label class="field-label" for="scale-input">PNG scale</label>
       <input type="number" id="scale-input" min="1" max="4" step="1" value="2" title="Higher = sharper PNG" />
 
@@ -222,7 +228,7 @@ function buildUi() {
         <div id="position-panel" class="position-panel hidden">
           <div class="position-panel-header">
             <span>Block positions</span>
-            <span class="position-hint">Drag blocks in preview or edit X/Y</span>
+            <span class="position-hint">Drag blocks · turn on Resize subgraphs for handles</span>
             <button type="button" id="btn-reset-positions">Reset positions</button>
           </div>
           <div class="position-rows"></div>
@@ -258,6 +264,7 @@ function getElements() {
     edgeLayout: document.getElementById('edge-layout'),
     blockLayout: document.getElementById('block-layout'),
     manualPositions: document.getElementById('manual-positions'),
+    subgraphResize: document.getElementById('subgraph-resize'),
     positionPanel: document.getElementById('position-panel'),
     btnResetPositions: document.getElementById('btn-reset-positions'),
     scaleInput: document.getElementById('scale-input'),
@@ -306,9 +313,29 @@ function applyPreviewSurface(wrap, themeKey) {
   wrap.dataset.theme = themeKey;
 }
 
+function normalizePreviewSvgSizing(svgEl, manualPositions) {
+  if (!svgEl || manualPositions) return;
+
+  // Mermaid uses width="100%" plus an inline max-width, which collapses inside the
+  // shrink-wrapped canvas. Rely on viewBox + CSS width:100% for responsive scaling.
+  svgEl.removeAttribute('width');
+  svgEl.removeAttribute('height');
+  svgEl.style.removeProperty('max-width');
+  svgEl.style.removeProperty('width');
+  svgEl.style.removeProperty('height');
+}
+
+function syncSubgraphResizeControl(els) {
+  const manualOn = Boolean(els.manualPositions?.checked);
+  if (!els.subgraphResize) return;
+  els.subgraphResize.disabled = !manualOn;
+}
+
 function mountNodePositioning(text, els, layoutOptions) {
   const svg = els.previewCanvas.querySelector('svg');
   const enabled = Boolean(els.manualPositions?.checked) && isFlowchartDiagram(text);
+  const showSubgraphHandles =
+    enabled && Boolean(els.subgraphResize?.checked);
 
   setupNodePositioning({
     previewWrap: els.previewWrap,
@@ -316,6 +343,7 @@ function mountNodePositioning(text, els, layoutOptions) {
     diagramKey: text,
     edgeLayout: layoutOptions.edgeLayout,
     enabled,
+    showSubgraphHandles,
     panelEl: els.positionPanel,
     resetBtn: els.btnResetPositions,
   });
@@ -362,13 +390,12 @@ async function renderDiagram(
   try {
     const renderSource = enhanceFlowchartSource(text, layoutOptions);
     const { svg } = await mermaid.render(id, renderSource);
-    if (Boolean(els.manualPositions?.checked) && isFlowchartDiagram(text)) {
-      teardownNodePositioning();
-    }
+    teardownNodePositioning();
     els.previewCanvas.innerHTML = svg;
 
     const manualPositions = Boolean(els.manualPositions?.checked);
     const svgEl = els.previewCanvas.querySelector('svg');
+    normalizePreviewSvgSizing(svgEl, manualPositions);
     applyDistinctEdgeStyles(svgEl, { ...layoutOptions, manualPositions });
     mountNodePositioning(text, els, layoutOptions);
     setExportButtonsEnabled(els, true);
@@ -440,6 +467,8 @@ function prepareLiveSvgForExport(previewCanvas, backgroundColor) {
   if (backgroundColor) {
     insertBackgroundRect(cloned, backgroundColor, width, height);
   }
+
+  stripPositioningEditorArtifacts(cloned);
 
   return new XMLSerializer().serializeToString(cloned);
 }
@@ -625,6 +654,7 @@ function bindEvents(els) {
   const savedEdgeLayout = localStorage.getItem(EDGE_LAYOUT_STORAGE_KEY);
   const savedBlockLayout = localStorage.getItem(BLOCK_LAYOUT_STORAGE_KEY);
   const savedManualPositions = localStorage.getItem(MANUAL_POSITIONS_STORAGE_KEY);
+  const savedSubgraphResize = localStorage.getItem(SUBGRAPH_RESIZE_STORAGE_KEY);
   els.exportTheme.value =
     savedTheme && EXPORT_THEMES[savedTheme] ? savedTheme : DEFAULT_THEME;
   els.edgeLayout.value =
@@ -634,6 +664,8 @@ function bindEvents(els) {
       ? savedBlockLayout
       : DEFAULT_BLOCK_LAYOUT;
   els.manualPositions.checked = savedManualPositions === '1';
+  els.subgraphResize.checked = savedSubgraphResize === '1';
+  syncSubgraphResizeControl(els);
 
   els.editor.value = saved || DEFAULT_SOURCE;
   updateCharCount(els.charCount, els.editor.value.length);
@@ -663,6 +695,12 @@ function bindEvents(els) {
 
   els.manualPositions.addEventListener('change', () => {
     localStorage.setItem(MANUAL_POSITIONS_STORAGE_KEY, els.manualPositions.checked ? '1' : '0');
+    syncSubgraphResizeControl(els);
+    renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
+  });
+
+  els.subgraphResize.addEventListener('change', () => {
+    localStorage.setItem(SUBGRAPH_RESIZE_STORAGE_KEY, els.subgraphResize.checked ? '1' : '0');
     renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
   });
 

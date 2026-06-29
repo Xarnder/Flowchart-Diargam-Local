@@ -3,9 +3,23 @@ import { EDGE_LAYOUTS, isFlowchartDiagram, parseFlowchartEdges } from './edgeSty
 const POSITIONS_STORAGE_KEY = 'mermaid-studio-node-positions';
 const CLUSTER_PADDING = 12;
 const VIEWBOX_PADDING = 24;
+const CLUSTER_MIN_SIZE = 56;
+const HANDLE_SIZE = 9;
+
+const HANDLE_CURSORS = {
+  nw: 'nwse-resize',
+  n: 'ns-resize',
+  ne: 'nesw-resize',
+  e: 'ew-resize',
+  se: 'nwse-resize',
+  s: 'ns-resize',
+  sw: 'nesw-resize',
+  w: 'ew-resize',
+};
 
 /** In-memory positions survive source re-renders within the same browser session. */
 const sessionPositions = {};
+const sessionClusterRects = {};
 
 const RESERVED_IDS = new Set(['subgraph', 'end', 'graph', 'flowchart', 'tb', 'td', 'lr', 'rl', 'bt']);
 
@@ -28,6 +42,204 @@ function parseTranslate(transform) {
 
 function setTranslate(el, x, y) {
   el.setAttribute('transform', `translate(${x}, ${y})`);
+}
+
+function readClusterRect(clusterEl) {
+  const rect = clusterEl.querySelector(':scope > rect');
+  if (!rect) return null;
+
+  return {
+    x: Number(rect.getAttribute('x')),
+    y: Number(rect.getAttribute('y')),
+    width: Number(rect.getAttribute('width')),
+    height: Number(rect.getAttribute('height')),
+  };
+}
+
+function applyClusterRect(clusterEl, bounds) {
+  const rect = clusterEl.querySelector(':scope > rect');
+  if (!rect || !bounds) return;
+
+  rect.setAttribute('x', String(bounds.x));
+  rect.setAttribute('y', String(bounds.y));
+  rect.setAttribute('width', String(Math.max(bounds.width, CLUSTER_MIN_SIZE)));
+  rect.setAttribute('height', String(Math.max(bounds.height, CLUSTER_MIN_SIZE)));
+}
+
+function positionClusterLabel(clusterEl) {
+  const bounds = readClusterRect(clusterEl);
+  if (!bounds) return;
+
+  const label = clusterEl.querySelector('.cluster-label');
+  if (!label) return;
+
+  const text = label.querySelector('text');
+  if (text) {
+    text.setAttribute('text-anchor', 'middle');
+    const outerTspan = text.querySelector(':scope > tspan');
+    if (outerTspan) {
+      outerTspan.setAttribute('x', '0');
+    }
+    text.querySelectorAll('tspan tspan').forEach((tspan) => {
+      tspan.removeAttribute('x');
+    });
+  }
+
+  setTranslate(label, bounds.x + bounds.width / 2, bounds.y);
+
+  const inner = label.querySelector(':scope > g');
+  if (inner && text) {
+    try {
+      const box = text.getBBox();
+      if (box.width > 0) {
+        const offsetX = -box.x - box.width / 2;
+        inner.setAttribute('transform', `translate(${offsetX}, 0)`);
+        return;
+      }
+    } catch {
+      // getBBox can fail before the SVG is painted.
+    }
+    inner.removeAttribute('transform');
+  }
+}
+
+function ensureClusterHandles(clusterEl) {
+  let handles = clusterEl.querySelector('.cluster-handles');
+  if (handles) return handles;
+
+  handles = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  handles.setAttribute('class', 'cluster-handles');
+
+  for (const handleId of Object.keys(HANDLE_CURSORS)) {
+    const handle = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    handle.setAttribute('class', 'cluster-resize-handle');
+    handle.setAttribute('data-handle', handleId);
+    handle.setAttribute('rx', '2');
+    handles.appendChild(handle);
+  }
+
+  clusterEl.appendChild(handles);
+  return handles;
+}
+
+function updateClusterHandles(clusterEl) {
+  const bounds = readClusterRect(clusterEl);
+  const handles = clusterEl.querySelector('.cluster-handles');
+  if (!bounds || !handles) return;
+
+  const half = HANDLE_SIZE / 2;
+  const positions = {
+    nw: [bounds.x - half, bounds.y - half],
+    n: [bounds.x + bounds.width / 2 - half, bounds.y - half],
+    ne: [bounds.x + bounds.width - half, bounds.y - half],
+    e: [bounds.x + bounds.width - half, bounds.y + bounds.height / 2 - half],
+    se: [bounds.x + bounds.width - half, bounds.y + bounds.height - half],
+    s: [bounds.x + bounds.width / 2 - half, bounds.y + bounds.height - half],
+    sw: [bounds.x - half, bounds.y + bounds.height - half],
+    w: [bounds.x - half, bounds.y + bounds.height / 2 - half],
+  };
+
+  handles.querySelectorAll('.cluster-resize-handle').forEach((handle) => {
+    const id = handle.dataset.handle;
+    const [x, y] = positions[id] || [0, 0];
+    handle.setAttribute('x', String(x));
+    handle.setAttribute('y', String(y));
+    handle.setAttribute('width', String(HANDLE_SIZE));
+    handle.setAttribute('height', String(HANDLE_SIZE));
+    handle.style.cursor = HANDLE_CURSORS[id] || 'pointer';
+  });
+}
+
+function removeClusterHandles(clusterEl) {
+  clusterEl.querySelector('.cluster-handles')?.remove();
+}
+
+function syncClusterHandleVisibility(clusterEl) {
+  if (subgraphHandlesEnabled) {
+    ensureClusterHandles(clusterEl);
+    updateClusterHandles(clusterEl);
+  } else {
+    removeClusterHandles(clusterEl);
+  }
+}
+
+/** Remove editor-only overlays before SVG/PNG export. */
+export function stripPositioningEditorArtifacts(svgEl) {
+  if (!svgEl) return;
+  svgEl.querySelectorAll('.cluster-handles').forEach((el) => el.remove());
+}
+
+function computeResizedClusterRect(start, handle, dx, dy) {
+  let { x, y, width, height } = start;
+
+  if (handle.includes('e')) {
+    width = Math.max(CLUSTER_MIN_SIZE, start.width + dx);
+  }
+  if (handle.includes('w')) {
+    const nextWidth = Math.max(CLUSTER_MIN_SIZE, start.width - dx);
+    x = start.x + start.width - nextWidth;
+    width = nextWidth;
+  }
+  if (handle.includes('s')) {
+    height = Math.max(CLUSTER_MIN_SIZE, start.height + dy);
+  }
+  if (handle.includes('n')) {
+    const nextHeight = Math.max(CLUSTER_MIN_SIZE, start.height - dy);
+    y = start.y + start.height - nextHeight;
+    height = nextHeight;
+  }
+
+  return { x, y, width, height };
+}
+
+function getNodeBoundsInClusterSpace(svg, clusterEl, nodeIds, positionables) {
+  let bounds = null;
+
+  for (const id of nodeIds) {
+    const nodeEl = positionables.get(id);
+    if (!nodeEl?.classList.contains('node')) continue;
+
+    const nodeRect = getAbsoluteRect(nodeEl);
+    const topLeft = fromSvgRootPoint(svg, clusterEl, nodeRect.x, nodeRect.y);
+    const bottomRight = fromSvgRootPoint(
+      svg,
+      clusterEl,
+      nodeRect.x + nodeRect.width,
+      nodeRect.y + nodeRect.height,
+    );
+
+    bounds = mergeBounds(bounds, {
+      x: topLeft.x,
+      y: topLeft.y,
+      width: bottomRight.x - topLeft.x,
+      height: bottomRight.y - topLeft.y,
+    });
+  }
+
+  if (!bounds) return null;
+
+  return {
+    x: bounds.minX - CLUSTER_PADDING,
+    y: bounds.minY - CLUSTER_PADDING,
+    width: bounds.maxX - bounds.minX + CLUSTER_PADDING * 2,
+    height: bounds.maxY - bounds.minY + CLUSTER_PADDING * 2,
+  };
+}
+
+function unionClusterRect(manualRect, nodeRect) {
+  if (!nodeRect) return manualRect;
+
+  const minX = Math.min(manualRect.x, nodeRect.x);
+  const minY = Math.min(manualRect.y, nodeRect.y);
+  const maxX = Math.max(manualRect.x + manualRect.width, nodeRect.x + nodeRect.width);
+  const maxY = Math.max(manualRect.y + manualRect.height, nodeRect.y + nodeRect.height);
+
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(maxX - minX, CLUSTER_MIN_SIZE),
+    height: Math.max(maxY - minY, CLUSTER_MIN_SIZE),
+  };
 }
 
 export function getLogicalNodeId(el) {
@@ -241,6 +453,56 @@ function structuralDiagramKey(source) {
 function captureSessionPositions(positionables) {
   if (!positionables) return;
   Object.assign(sessionPositions, readPositions(positionables));
+  Object.assign(sessionClusterRects, readManualClusterRects(positionables));
+}
+
+function readManualClusterRects(positionables) {
+  const rects = {};
+  positionables.forEach((el, id) => {
+    if (!el.classList.contains('cluster') || !el.dataset.manualRect) return;
+    const bounds = readClusterRect(el);
+    if (bounds) rects[id] = bounds;
+  });
+  return rects;
+}
+
+function resolveStoredClusterRects(diagramKey, clusterIds) {
+  const store = loadAllPositions();
+  const merged = {};
+
+  const byCluster = store.byCluster || {};
+  for (const id of clusterIds) {
+    if (byCluster[id]) merged[id] = byCluster[id];
+  }
+
+  for (const id of clusterIds) {
+    if (sessionClusterRects[id]) merged[id] = sessionClusterRects[id];
+  }
+
+  return merged;
+}
+
+function setStoredClusterRects(diagramKey, rects) {
+  const store = loadAllPositions();
+  if (!store.byCluster) store.byCluster = {};
+
+  for (const [id, bounds] of Object.entries(rects)) {
+    store.byCluster[id] = bounds;
+    sessionClusterRects[id] = bounds;
+  }
+
+  saveAllPositions(store);
+}
+
+function clearStoredClusterRects(clusterIds) {
+  const store = loadAllPositions();
+  if (store.byCluster) {
+    for (const id of clusterIds) {
+      delete store.byCluster[id];
+      delete sessionClusterRects[id];
+    }
+  }
+  saveAllPositions(store);
 }
 
 function resolveStoredPositions(diagramKey, positionableIds) {
@@ -421,9 +683,15 @@ function restoreClusterDefaults(svg) {
     rect.setAttribute('width', defaults.width);
     rect.setAttribute('height', defaults.height);
 
+    delete clusterEl.dataset.manualRect;
+    removeClusterHandles(clusterEl);
+
     const label = clusterEl.querySelector('.cluster-label');
-    if (label && clusterEl.dataset.defaultLabelTransform) {
-      label.setAttribute('transform', clusterEl.dataset.defaultLabelTransform);
+    if (label) {
+      if (clusterEl.dataset.defaultLabelTransform) {
+        label.setAttribute('transform', clusterEl.dataset.defaultLabelTransform);
+      }
+      label.querySelector(':scope > g')?.removeAttribute('transform');
     }
   });
 
@@ -477,19 +745,47 @@ function resizeClusterToFitNodes(svg, clusterEl, nodeIds, positionables) {
   rect.setAttribute('width', String(width));
   rect.setAttribute('height', String(height));
 
-  const label = clusterEl.querySelector('.cluster-label');
-  if (label) {
-    setTranslate(label, topLeft.x + width / 2, topLeft.y);
-  }
+  positionClusterLabel(clusterEl);
 }
 
-function resizeSubgraphContainers(svg, positionables, diagramKey) {
+function applyClusterLayout(
+  svg,
+  clusterEl,
+  clusterId,
+  nodeIds,
+  positionables,
+  manualRect,
+) {
+  if (manualRect) {
+    const nodeBounds = getNodeBoundsInClusterSpace(svg, clusterEl, nodeIds, positionables);
+    applyClusterRect(clusterEl, unionClusterRect(manualRect, nodeBounds));
+  } else {
+    resizeClusterToFitNodes(svg, clusterEl, nodeIds, positionables);
+  }
+
+  positionClusterLabel(clusterEl);
+  syncClusterHandleVisibility(clusterEl);
+}
+
+function syncSubgraphContainers(svg, positionables, diagramKey) {
   const membership = parseSubgraphMembership(diagramKey);
+  const storedRects = resolveStoredClusterRects(diagramKey, [...membership.keys()]);
+
   membership.forEach((nodeIds, clusterId) => {
     const clusterEl = positionables.get(clusterId);
     if (!clusterEl?.classList.contains('cluster')) return;
-    resizeClusterToFitNodes(svg, clusterEl, nodeIds, positionables);
+
+    const manualRect = storedRects[clusterId];
+    if (manualRect) {
+      clusterEl.dataset.manualRect = '1';
+    }
+
+    applyClusterLayout(svg, clusterEl, clusterId, nodeIds, positionables, manualRect);
   });
+}
+
+function resizeSubgraphContainers(svg, positionables, diagramKey) {
+  syncSubgraphContainers(svg, positionables, diagramKey);
 }
 
 function expandSvgViewBox(svg) {
@@ -519,8 +815,10 @@ function expandSvgViewBox(svg) {
   svg.setAttribute('height', String(height));
 }
 
-function syncManualLayout(svg, positionables, edgeLayout, diagramKey) {
-  resizeSubgraphContainers(svg, positionables, diagramKey);
+function syncManualLayout(svg, positionables, edgeLayout, diagramKey, options = {}) {
+  if (!options.skipClusterSync) {
+    syncSubgraphContainers(svg, positionables, diagramKey);
+  }
   rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
   expandSvgViewBox(svg);
 }
@@ -644,11 +942,13 @@ function applyPositions(positionables, positions) {
 }
 
 let activeController = null;
+let subgraphHandlesEnabled = false;
 
 export function teardownNodePositioning() {
   captureSessionPositions(activeController?.positionables);
   activeController?.destroy();
   activeController = null;
+  subgraphHandlesEnabled = false;
 }
 
 export function setupNodePositioning({
@@ -657,6 +957,7 @@ export function setupNodePositioning({
   diagramKey,
   edgeLayout,
   enabled,
+  showSubgraphHandles = false,
   panelEl,
   resetBtn,
 }) {
@@ -664,8 +965,12 @@ export function setupNodePositioning({
 
   if (!enabled || !svg || !isFlowchartDiagram(diagramKey) || !panelEl) {
     panelEl?.classList.add('hidden');
+    previewWrap.removeAttribute('data-manual-positions');
+    previewWrap.removeAttribute('data-subgraph-resize');
     return null;
   }
+
+  subgraphHandlesEnabled = Boolean(showSubgraphHandles);
 
   const positionables = collectPositionables(svg);
   if (positionables.size === 0) {
@@ -675,6 +980,11 @@ export function setupNodePositioning({
 
   panelEl.classList.remove('hidden');
   previewWrap.dataset.manualPositions = 'true';
+  if (showSubgraphHandles) {
+    previewWrap.dataset.subgraphResize = 'true';
+  } else {
+    previewWrap.removeAttribute('data-subgraph-resize');
+  }
 
   storeClusterDefaults(svg);
   bindFlowchartEdges(svg, positionables, diagramKey);
@@ -696,7 +1006,11 @@ export function setupNodePositioning({
   const controller = {
     positionables,
     destroy() {
+      positionables.forEach((el) => {
+        if (el.classList.contains('cluster')) removeClusterHandles(el);
+      });
       previewWrap.removeAttribute('data-manual-positions');
+      previewWrap.removeAttribute('data-subgraph-resize');
       previewWrap.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
@@ -710,16 +1024,62 @@ export function setupNodePositioning({
   function persistPositions() {
     const positions = readPositions(positionables);
     setStoredPositions(diagramKey, positions, [...positionables.keys()]);
+
+    const clusterRects = readManualClusterRects(positionables);
+    if (Object.keys(clusterRects).length > 0) {
+      setStoredClusterRects(diagramKey, clusterRects);
+    }
+  }
+
+  function syncClusterPanel(id) {
+    const el = positionables.get(id);
+    if (!el?.classList.contains('cluster')) return;
+
+    const bounds = readClusterRect(el);
+    const row = panelEl.querySelector(`.position-row[data-node-id="${CSS.escape(id)}"]`);
+    if (!row || !bounds) return;
+
+    const widthInput = row.querySelector('[data-axis="w"]');
+    const heightInput = row.querySelector('[data-axis="h"]');
+    if (widthInput) widthInput.value = String(Math.round(bounds.width));
+    if (heightInput) heightInput.value = String(Math.round(bounds.height));
   }
 
   function syncFromNode(id) {
     const el = positionables.get(id);
     if (!el) return;
+
+    if (el.classList.contains('cluster')) {
+      syncClusterPanel(id);
+      return;
+    }
+
     const { x, y } = parseTranslate(el.getAttribute('transform'));
     const row = panelEl.querySelector(`.position-row[data-node-id="${CSS.escape(id)}"]`);
     if (!row) return;
     row.querySelector('[data-axis="x"]').value = String(Math.round(x));
     row.querySelector('[data-axis="y"]').value = String(Math.round(y));
+  }
+
+  function resizeCluster(id, width, height) {
+    const clusterEl = positionables.get(id);
+    if (!clusterEl?.classList.contains('cluster')) return;
+
+    const bounds = readClusterRect(clusterEl);
+    if (!bounds) return;
+
+    clusterEl.dataset.manualRect = '1';
+    applyClusterRect(clusterEl, {
+      x: bounds.x,
+      y: bounds.y,
+      width: Math.max(CLUSTER_MIN_SIZE, width),
+      height: Math.max(CLUSTER_MIN_SIZE, height),
+    });
+    positionClusterLabel(clusterEl);
+    syncClusterHandleVisibility(clusterEl);
+    syncManualLayout(svg, positionables, edgeLayout, diagramKey, { skipClusterSync: true });
+    syncClusterPanel(id);
+    persistPositions();
   }
 
   function moveNode(id, x, y) {
@@ -737,6 +1097,17 @@ export function setupNodePositioning({
     const id = input.dataset.nodeId;
     const row = panelEl.querySelector(`.position-row[data-node-id="${CSS.escape(id)}"]`);
     if (!row) return;
+
+    const el = positionables.get(id);
+    if (el?.classList.contains('cluster')) {
+      const width = Number(row.querySelector('[data-axis="w"]')?.value);
+      const height = Number(row.querySelector('[data-axis="h"]')?.value);
+      if (Number.isFinite(width) && Number.isFinite(height)) {
+        resizeCluster(id, width, height);
+      }
+      return;
+    }
+
     const x = Number(row.querySelector('[data-axis="x"]').value);
     const y = Number(row.querySelector('[data-axis="y"]').value);
     if (Number.isFinite(x) && Number.isFinite(y)) {
@@ -745,11 +1116,18 @@ export function setupNodePositioning({
   }
 
   function onReset() {
+    const clusterIds = [...positionables.entries()]
+      .filter(([, el]) => el.classList.contains('cluster'))
+      .map(([id]) => id);
+
     clearStoredPositions(diagramKey, [...positionables.keys()]);
+    clearStoredClusterRects(clusterIds);
     restoreClusterDefaults(svg);
     positionables.forEach((el, id) => {
+      delete el.dataset.manualRect;
       const row = panelEl.querySelector(`.position-row[data-node-id="${CSS.escape(id)}"]`);
       if (!row) return;
+      if (el.classList.contains('cluster')) return;
       const x = Number(row.dataset.defaultX);
       const y = Number(row.dataset.defaultY);
       setTranslate(el, x, y);
@@ -762,6 +1140,19 @@ export function setupNodePositioning({
     const rows = [...positionables.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([id, el]) => {
+        if (el.classList.contains('cluster')) {
+          const bounds = readClusterRect(el);
+          const width = Math.round(bounds?.width ?? 0);
+          const height = Math.round(bounds?.height ?? 0);
+          return `
+            <div class="position-row position-row-cluster" data-node-id="${id}">
+              <label class="position-node-id" for="pos-${id}-w">${id}</label>
+              <input type="number" id="pos-${id}-w" data-node-id="${id}" data-axis="w" value="${width}" step="1" min="${CLUSTER_MIN_SIZE}" title="Subgraph width" />
+              <input type="number" id="pos-${id}-h" data-node-id="${id}" data-axis="h" value="${height}" step="1" min="${CLUSTER_MIN_SIZE}" title="Subgraph height" />
+            </div>
+          `;
+        }
+
         const { x, y } = parseTranslate(el.getAttribute('transform'));
         const defaultX = Number(el.dataset.defaultX ?? x);
         const defaultY = Number(el.dataset.defaultY ?? y);
@@ -781,8 +1172,40 @@ export function setupNodePositioning({
   renderPanel();
 
   function onPointerDown(event) {
+    const handle = event.target.closest('.cluster-resize-handle');
+    if (handle) {
+      const clusterEl = handle.closest('g.cluster');
+      const id = getLogicalNodeId(clusterEl);
+      if (!clusterEl || !positionables.has(id)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const svgEl = previewWrap.querySelector('svg');
+      const ctm = svgEl.getScreenCTM();
+      if (!ctm) return;
+
+      const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
+      const startRect = readClusterRect(clusterEl);
+      if (!startRect) return;
+
+      dragState = {
+        mode: 'resize-cluster',
+        clusterId: id,
+        clusterEl,
+        handle: handle.dataset.handle,
+        startRect,
+        startPoint: { x: point.x, y: point.y },
+      };
+
+      clusterEl.classList.add('is-resizing');
+      previewWrap.setPointerCapture?.(event.pointerId);
+      return;
+    }
+
     const target = event.target.closest('g.node, g.cluster');
     if (!target || !previewWrap.contains(target)) return;
+    if (event.target.closest('.cluster-handles')) return;
 
     const id = getLogicalNodeId(target);
     if (!positionables.has(id)) return;
@@ -798,6 +1221,7 @@ export function setupNodePositioning({
       target.classList.contains('cluster') ? getNodesInCluster(target, positionables) : [[id, target]];
 
     dragState = {
+      mode: 'move',
       primaryId: id,
       bundled: bundled.map(([nodeId, el]) => ({
         id: nodeId,
@@ -822,6 +1246,28 @@ export function setupNodePositioning({
     if (!ctm) return;
 
     const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
+
+    if (dragState.mode === 'resize-cluster') {
+      const localPoint = fromSvgRootPoint(svg, dragState.clusterEl, point.x, point.y);
+      const localStart = fromSvgRootPoint(
+        svg,
+        dragState.clusterEl,
+        dragState.startPoint.x,
+        dragState.startPoint.y,
+      );
+      const dx = localPoint.x - localStart.x;
+      const dy = localPoint.y - localStart.y;
+      const nextRect = computeResizedClusterRect(dragState.startRect, dragState.handle, dx, dy);
+
+      dragState.clusterEl.dataset.manualRect = '1';
+      applyClusterRect(dragState.clusterEl, nextRect);
+      positionClusterLabel(dragState.clusterEl);
+      updateClusterHandles(dragState.clusterEl);
+      syncClusterPanel(dragState.clusterId);
+      syncManualLayout(svg, positionables, edgeLayout, diagramKey, { skipClusterSync: true });
+      return;
+    }
+
     const nextX = point.x - dragState.offsetX;
     const nextY = point.y - dragState.offsetY;
     const primary = dragState.bundled.find((item) => item.id === dragState.primaryId);
@@ -840,8 +1286,8 @@ export function setupNodePositioning({
 
   function onPointerUp(event) {
     if (!dragState) return;
-    const dragging = previewWrap.querySelector('.is-dragging');
-    dragging?.classList.remove('is-dragging');
+    previewWrap.querySelector('.is-dragging')?.classList.remove('is-dragging');
+    previewWrap.querySelector('.is-resizing')?.classList.remove('is-resizing');
     dragState = null;
     persistPositions();
     previewWrap.releasePointerCapture?.(event.pointerId);

@@ -272,13 +272,30 @@ body.is-resizing-panels {
   overflow: auto;
   padding: 1rem;
   -webkit-overflow-scrolling: touch;
-  text-align: center;
 }
 
 .preview-canvas {
+  min-height: min-content;
+}
+
+#preview-wrap:not([data-manual-positions='true']) .preview-scrollport {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+#preview-wrap:not([data-manual-positions='true']) .preview-canvas {
+  width: 100%;
+  max-width: 100%;
+}
+
+#preview-wrap[data-manual-positions='true'] .preview-scrollport {
+  text-align: center;
+}
+
+#preview-wrap[data-manual-positions='true'] .preview-canvas {
   display: inline-block;
   min-width: min-content;
-  min-height: min-content;
   text-align: left;
 }
 
@@ -303,13 +320,16 @@ body.is-resizing-panels {
 
 #preview-wrap svg {
   display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+
+#preview-wrap[data-manual-positions='true'] svg {
   width: auto;
   height: auto;
   max-width: none;
   max-height: none;
-}
-
-#preview-wrap[data-manual-positions='true'] svg {
   overflow: visible;
 }
 
@@ -413,6 +433,42 @@ footer {
   cursor: grabbing;
 }
 
+#preview-wrap[data-subgraph-resize='true'] .cluster-resize-handle {
+  fill: #6c9eff;
+  stroke: #0f1117;
+  stroke-width: 1.25;
+  opacity: 0.95;
+}
+
+#preview-wrap[data-subgraph-resize='true'] .cluster-resize-handle:hover {
+  fill: #8ab4ff;
+  opacity: 1;
+}
+
+#preview-wrap[data-subgraph-resize='true'] g.cluster.is-resizing > rect:first-of-type {
+  stroke: #6c9eff;
+  stroke-width: 2;
+}
+
+#preview-wrap[data-subgraph-resize='true'] g.cluster.positionable-node {
+  cursor: default;
+}
+
+.position-panel-header .position-columns {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.position-panel-header .position-columns span {
+  width: 4.5rem;
+  text-align: center;
+}
+
 .position-panel {
   border-top: 1px solid var(--border);
   background: var(--surface);
@@ -467,6 +523,13 @@ footer {
   font-family: var(--font-mono);
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+.position-row-cluster .position-node-id::after {
+  content: ' W×H';
+  font-size: 0.6rem;
+  color: var(--muted);
+  font-weight: normal;
 }
 
 .position-row input[type='number'] {
