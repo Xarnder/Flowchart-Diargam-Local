@@ -1,6 +1,6 @@
 # Mermaid Studio
 
-A **local, browser-based** Mermaid editor with live preview and PNG export.
+A **local, browser-based** Mermaid editor with live preview and PNG/SVG export.
 
 - All rendering happens **on your device** — nothing is sent to any server
 - **Free**, no account, no diagram count limit
@@ -8,15 +8,54 @@ A **local, browser-based** Mermaid editor with live preview and PNG export.
 - Auto-saves your last diagram and export theme to `localStorage`
 - Default export theme: **Dark**
 
-## Quick start
+## Requirements
+
+- [Node.js](https://nodejs.org/) **18 or newer** (includes `npm`)
+- A modern web browser (Chrome, Firefox, Safari, or Edge)
+
+Check your version:
 
 ```bash
-cd tools/mermaid-studio
+node -v
+npm -v
+```
+
+## Download and run (for anyone cloning this repo)
+
+### 1. Get the code
+
+**Option A — Git clone (recommended)**
+
+```bash
+git clone https://github.com/Xarnder/Flowchart-Diargam-Local.git
+cd Flowchart-Diargam-Local
+```
+
+**Option B — Download ZIP**
+
+1. Open [https://github.com/Xarnder/Flowchart-Diargam-Local](https://github.com/Xarnder/Flowchart-Diargam-Local)
+2. Click **Code** → **Download ZIP**
+3. Unzip the folder and open a terminal inside it
+
+### 2. Install dependencies
+
+You only need to do this once (or after pulling updates that change `package.json`):
+
+```bash
 npm install
+```
+
+This downloads packages listed in `package.json` into `node_modules/`. That folder is **not** stored in Git — everyone runs `npm install` locally.
+
+### 3. Start the app
+
+```bash
 npm run dev
 ```
 
-Open the URL shown (usually `http://localhost:5173`).
+Open the URL shown in the terminal (usually **http://localhost:5173**).
+
+Press `Ctrl + C` in the terminal to stop the dev server.
 
 ## Usage
 
@@ -26,14 +65,16 @@ Open the URL shown (usually `http://localhost:5173`).
 4. Click **Save PNG** (or **Cmd/Ctrl + S**) or **Save SVG** (or **Cmd/Ctrl + Shift + S**)
 5. Optional: adjust **PNG scale** (2× default for sharper output)
 
-## Build static version
+## Build a static version (optional)
+
+To create files you can host offline or on any static file server:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-The `dist/` folder can be hosted anywhere or kept for offline use after building.
+The built site is in `dist/`. Open the preview URL, or serve `dist/` with any static host.
 
 ## Keyboard shortcuts
 
@@ -42,6 +83,26 @@ The `dist/` folder can be hosted anywhere or kept for offline use after building
 | `Cmd/Ctrl + Enter` | Render now |
 | `Cmd/Ctrl + S` | Save PNG |
 | `Cmd/Ctrl + Shift + S` | Save SVG |
+
+## Uploading changes to GitHub (for maintainers)
+
+**Do not commit `node_modules/` or `dist/`.** They are listed in `.gitignore`. Only source files and `package.json` / `package-lock.json` belong in the repo.
+
+First-time setup (connect your local folder to GitHub):
+
+```bash
+git remote add origin https://github.com/Xarnder/Flowchart-Diargam-Local.git
+```
+
+Push your code:
+
+```bash
+git add .
+git commit -m "Your message describing the change"
+git push -u origin main
+```
+
+If the remote already exists, skip `git remote add` and use `git push` after committing.
 
 ## Notes
 
