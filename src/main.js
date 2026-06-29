@@ -17,6 +17,8 @@ const THEME_STORAGE_KEY = 'mermaid-studio-export-theme';
 const EDGE_LAYOUT_STORAGE_KEY = 'mermaid-studio-edge-layout';
 const BLOCK_LAYOUT_STORAGE_KEY = 'mermaid-studio-block-layout';
 const MANUAL_POSITIONS_STORAGE_KEY = 'mermaid-studio-manual-positions';
+const SPLIT_RATIO_STORAGE_KEY = 'mermaid-studio-split-ratio';
+const SOURCE_COLLAPSED_STORAGE_KEY = 'mermaid-studio-source-collapsed';
 const DEFAULT_THEME = 'dark';
 const DEFAULT_EDGE_LAYOUT = EDGE_LAYOUTS.curvy;
 const DEFAULT_BLOCK_LAYOUT = BLOCK_LAYOUTS.original;
@@ -188,22 +190,34 @@ function buildUi() {
       <button type="button" id="btn-render">Render now</button>
     </div>
 
-    <div class="main">
-      <section class="panel">
+    <div class="main" id="main-split">
+      <section class="panel panel-source" id="panel-source">
         <div class="panel-header">
           <span>Source</span>
-          <span id="char-count" class="char-count ok">0 / ${MAX_CHARS.toLocaleString()}</span>
+          <div class="panel-header-actions">
+            <span id="char-count" class="char-count ok">0 / ${MAX_CHARS.toLocaleString()}</span>
+            <button type="button" id="btn-collapse-source" class="panel-btn" title="Hide source panel">Hide source</button>
+          </div>
         </div>
         <textarea id="editor" spellcheck="false" placeholder="Paste Mermaid code here…"></textarea>
       </section>
 
-      <section class="panel panel-preview">
+      <div class="split-handle" id="split-handle" role="separator" aria-orientation="vertical" aria-label="Resize source and preview panels" tabindex="0"></div>
+
+      <section class="panel panel-preview" id="panel-preview">
         <div class="panel-header">
-          <span>Preview</span>
+          <div class="panel-header-leading">
+            <button type="button" id="btn-show-source" class="panel-btn hidden" title="Show source panel">Show source</button>
+            <span>Preview</span>
+          </div>
           <span id="preview-status"><span class="status-dot"></span>Waiting</span>
         </div>
         <div id="preview-wrap" data-theme="${DEFAULT_THEME}">
-          <p class="preview-placeholder">Live preview appears here as you type.</p>
+          <div class="preview-scrollport">
+            <div id="preview-canvas" class="preview-canvas">
+              <p class="preview-placeholder">Live preview appears here as you type.</p>
+            </div>
+          </div>
         </div>
         <div id="position-panel" class="position-panel hidden">
           <div class="position-panel-header">
@@ -227,6 +241,11 @@ function getElements() {
   return {
     editor: document.getElementById('editor'),
     previewWrap: document.getElementById('preview-wrap'),
+    previewCanvas: document.getElementById('preview-canvas'),
+    mainSplit: document.getElementById('main-split'),
+    splitHandle: document.getElementById('split-handle'),
+    btnCollapseSource: document.getElementById('btn-collapse-source'),
+    btnShowSource: document.getElementById('btn-show-source'),
     charCount: document.getElementById('char-count'),
     previewStatus: document.getElementById('preview-status'),
     btnExportPng: document.getElementById('btn-export-png'),
@@ -268,8 +287,8 @@ function setStatus(el, state, message) {
   el.innerHTML = `<span class="status-dot ${dotClass}"></span>${message}`;
 }
 
-function showPreviewError(wrap, message) {
-  wrap.innerHTML = `<div class="preview-error">${escapeHtml(message)}</div>`;
+function showPreviewError(canvas, message) {
+  canvas.innerHTML = `<div class="preview-error">${escapeHtml(message)}</div>`;
 }
 
 function escapeHtml(text) {
@@ -288,7 +307,7 @@ function applyPreviewSurface(wrap, themeKey) {
 }
 
 function mountNodePositioning(text, els, layoutOptions) {
-  const svg = els.previewWrap.querySelector('svg');
+  const svg = els.previewCanvas.querySelector('svg');
   const enabled = Boolean(els.manualPositions?.checked) && isFlowchartDiagram(text);
 
   setupNodePositioning({
@@ -321,7 +340,7 @@ async function renderDiagram(
     setExportButtonsEnabled(els, false);
     teardownNodePositioning();
     els.positionPanel?.classList.add('hidden');
-    els.previewWrap.innerHTML =
+    els.previewCanvas.innerHTML =
       '<p class="preview-placeholder">Paste Mermaid code in the editor to see a preview.</p>';
     setStatus(els.previewStatus, 'idle', 'Empty');
     return false;
@@ -330,7 +349,7 @@ async function renderDiagram(
   if (text.length > MAX_CHARS) {
     setExportButtonsEnabled(els, false);
     showPreviewError(
-      els.previewWrap,
+      els.previewCanvas,
       `Diagram exceeds the ${MAX_CHARS.toLocaleString()} character limit (${text.length.toLocaleString()} chars).\n\nShorten the source or split into multiple diagrams.`,
     );
     setStatus(els.previewStatus, 'error', 'Too large');
@@ -343,10 +362,13 @@ async function renderDiagram(
   try {
     const renderSource = enhanceFlowchartSource(text, layoutOptions);
     const { svg } = await mermaid.render(id, renderSource);
-    els.previewWrap.innerHTML = svg;
+    if (Boolean(els.manualPositions?.checked) && isFlowchartDiagram(text)) {
+      teardownNodePositioning();
+    }
+    els.previewCanvas.innerHTML = svg;
 
     const manualPositions = Boolean(els.manualPositions?.checked);
-    const svgEl = els.previewWrap.querySelector('svg');
+    const svgEl = els.previewCanvas.querySelector('svg');
     applyDistinctEdgeStyles(svgEl, { ...layoutOptions, manualPositions });
     mountNodePositioning(text, els, layoutOptions);
     setExportButtonsEnabled(els, true);
@@ -354,7 +376,7 @@ async function renderDiagram(
     return true;
   } catch (err) {
     setExportButtonsEnabled(els, false);
-    showPreviewError(els.previewWrap, err?.message || String(err));
+    showPreviewError(els.previewCanvas, err?.message || String(err));
     setStatus(els.previewStatus, 'error', 'Syntax error');
     return false;
   }
@@ -400,8 +422,8 @@ function insertBackgroundRect(svgEl, backgroundColor, width, height) {
  * Serialize the live preview SVG (WYSIWYG export).
  * Clones the rendered DOM node so styles and native SVG text are preserved.
  */
-function prepareLiveSvgForExport(previewWrap, backgroundColor) {
-  const liveSvg = previewWrap.querySelector('svg');
+function prepareLiveSvgForExport(previewCanvas, backgroundColor) {
+  const liveSvg = previewCanvas.querySelector('svg');
   if (!liveSvg) {
     throw new Error('Nothing to export — render a diagram first');
   }
@@ -422,14 +444,14 @@ function prepareLiveSvgForExport(previewWrap, backgroundColor) {
   return new XMLSerializer().serializeToString(cloned);
 }
 
-async function getExportSvg(source, themeKey, previewWrap, els) {
+async function getExportSvg(source, themeKey, previewCanvas, els) {
   const layoutOptions = getRenderLayoutOptions(els);
   const needsRender =
     themeKey !== currentExportTheme ||
     layoutOptions.edgeLayout !== currentEdgeLayout ||
     layoutOptions.blockLayout !== currentBlockLayout ||
     source.trim() !== lastSource.trim() ||
-    !previewWrap.querySelector('svg');
+    !previewCanvas.querySelector('svg');
 
   if (needsRender) {
     const ok = await renderDiagram(source, els, themeKey);
@@ -439,7 +461,7 @@ async function getExportSvg(source, themeKey, previewWrap, els) {
   }
 
   const { background } = getExportThemeConfig(themeKey);
-  return prepareLiveSvgForExport(previewWrap, background);
+  return prepareLiveSvgForExport(previewCanvas, background);
 }
 
 async function svgToPng(svgString, scale) {
@@ -501,7 +523,103 @@ function timestampFilename(ext, themeKey) {
   return `mermaid-diagram-${themeKey}-${stamp}.${ext}`;
 }
 
+function initLayoutControls(els) {
+  const { mainSplit, splitHandle, btnCollapseSource, btnShowSource } = els;
+  let ratio = Number(localStorage.getItem(SPLIT_RATIO_STORAGE_KEY));
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
+    ratio = 0.5;
+  }
+
+  let collapsed = localStorage.getItem(SOURCE_COLLAPSED_STORAGE_KEY) === '1';
+  let dragging = false;
+
+  function isStackedLayout() {
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+
+  function applySplit(nextRatio) {
+    ratio = Math.min(0.85, Math.max(0.15, nextRatio));
+    if (isStackedLayout()) {
+      mainSplit.style.gridTemplateColumns = '1fr';
+      mainSplit.style.gridTemplateRows = `minmax(180px, ${ratio}fr) 6px minmax(220px, ${1 - ratio}fr)`;
+    } else {
+      mainSplit.style.gridTemplateRows = '';
+      mainSplit.style.gridTemplateColumns = `minmax(220px, ${ratio}fr) 6px minmax(280px, ${1 - ratio}fr)`;
+    }
+    localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(ratio));
+  }
+
+  function applyCollapsed(nextCollapsed) {
+    collapsed = nextCollapsed;
+    mainSplit.classList.toggle('source-collapsed', collapsed);
+    btnShowSource.classList.toggle('hidden', !collapsed);
+    btnCollapseSource.classList.toggle('hidden', collapsed);
+    splitHandle.setAttribute('aria-hidden', collapsed ? 'true' : 'false');
+
+    if (collapsed) {
+      mainSplit.style.gridTemplateColumns = '1fr';
+      mainSplit.style.gridTemplateRows = '';
+    } else {
+      applySplit(ratio);
+    }
+
+    localStorage.setItem(SOURCE_COLLAPSED_STORAGE_KEY, collapsed ? '1' : '0');
+  }
+
+  function ratioFromPointer(clientX, clientY) {
+    const rect = mainSplit.getBoundingClientRect();
+    if (isStackedLayout()) {
+      return (clientY - rect.top) / rect.height;
+    }
+    return (clientX - rect.left) / rect.width;
+  }
+
+  splitHandle.addEventListener('mousedown', (event) => {
+    if (collapsed) return;
+    dragging = true;
+    splitHandle.classList.add('is-dragging');
+    document.body.classList.add('is-resizing-panels');
+    event.preventDefault();
+  });
+
+  splitHandle.addEventListener('keydown', (event) => {
+    if (collapsed) return;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      applySplit(ratio - 0.03);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      applySplit(ratio + 0.03);
+    }
+  });
+
+  window.addEventListener('mousemove', (event) => {
+    if (!dragging || collapsed) return;
+    applySplit(ratioFromPointer(event.clientX, event.clientY));
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    splitHandle.classList.remove('is-dragging');
+    document.body.classList.remove('is-resizing-panels');
+  });
+
+  window.addEventListener('resize', () => {
+    if (!collapsed) applySplit(ratio);
+  });
+
+  btnCollapseSource.addEventListener('click', () => applyCollapsed(true));
+  btnShowSource.addEventListener('click', () => {
+    applyCollapsed(false);
+    els.editor.focus();
+  });
+
+  applyCollapsed(collapsed);
+}
+
 function bindEvents(els) {
+  initLayoutControls(els);
   const saved = localStorage.getItem(STORAGE_KEY);
   const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
   const savedEdgeLayout = localStorage.getItem(EDGE_LAYOUT_STORAGE_KEY);
@@ -580,7 +698,7 @@ function bindEvents(els) {
       const exportSvg = await getExportSvg(
         els.editor.value,
         els.exportTheme.value,
-        els.previewWrap,
+        els.previewCanvas,
         els,
       );
       await navigator.clipboard.writeText(exportSvg);
@@ -597,7 +715,7 @@ function bindEvents(els) {
     } catch (err) {
       alert(err?.message || 'Copy failed');
     } finally {
-      els.btnCopySvg.disabled = !els.previewWrap.querySelector('svg');
+      els.btnCopySvg.disabled = !els.previewCanvas.querySelector('svg');
     }
   });
 
@@ -612,7 +730,7 @@ function bindEvents(els) {
       const exportSvg = await getExportSvg(
         els.editor.value,
         themeKey,
-        els.previewWrap,
+        els.previewCanvas,
         els,
       );
       downloadText(exportSvg, timestampFilename('svg', themeKey), 'image/svg+xml;charset=utf-8');
@@ -639,7 +757,7 @@ function bindEvents(els) {
       const exportSvg = await getExportSvg(
         els.editor.value,
         themeKey,
-        els.previewWrap,
+        els.previewCanvas,
         els,
       );
       const pngBlob = await svgToPng(exportSvg, scale);

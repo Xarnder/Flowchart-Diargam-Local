@@ -1,6 +1,13 @@
 import { EDGE_LAYOUTS, isFlowchartDiagram, parseFlowchartEdges } from './edgeStyling.js';
 
 const POSITIONS_STORAGE_KEY = 'mermaid-studio-node-positions';
+const CLUSTER_PADDING = 12;
+const VIEWBOX_PADDING = 24;
+
+/** In-memory positions survive source re-renders within the same browser session. */
+const sessionPositions = {};
+
+const RESERVED_IDS = new Set(['subgraph', 'end', 'graph', 'flowchart', 'tb', 'td', 'lr', 'rl', 'bt']);
 
 function hashString(value) {
   let hash = 0;
@@ -199,6 +206,65 @@ export function bindFlowchartEdges(svg, positionables, diagramKey) {
   });
 }
 
+function extractPositionableIds(source) {
+  const ids = new Set();
+
+  for (const line of source.split('\n')) {
+    const trimmed = line.trim();
+    const subgraphMatch = /^subgraph\s+([A-Za-z][\w-]*)/i.exec(trimmed);
+    if (subgraphMatch) {
+      ids.add(subgraphMatch[1]);
+    }
+
+    for (const match of trimmed.matchAll(/\b([A-Za-z][\w-]*)\s*(?:\[|\(|\{)/g)) {
+      if (!RESERVED_IDS.has(match[1].toLowerCase())) {
+        ids.add(match[1]);
+      }
+    }
+
+    const edgeParts = trimmed.split(/(?:-->|---|===|-.->|<-->|--o|--x)/);
+    for (const part of edgeParts) {
+      const id = part.trim().match(/^([A-Za-z][\w-]*)/)?.[1];
+      if (id && !RESERVED_IDS.has(id.toLowerCase())) {
+        ids.add(id);
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+function structuralDiagramKey(source) {
+  return hashString(extractPositionableIds(source).sort().join('\n'));
+}
+
+function captureSessionPositions(positionables) {
+  if (!positionables) return;
+  Object.assign(sessionPositions, readPositions(positionables));
+}
+
+function resolveStoredPositions(diagramKey, positionableIds) {
+  const store = loadAllPositions();
+  const merged = {};
+
+  const legacy = store[hashString(diagramKey)];
+  if (legacy) Object.assign(merged, legacy);
+
+  const structural = store[structuralDiagramKey(diagramKey)];
+  if (structural) Object.assign(merged, structural);
+
+  const byNode = store.byNode || {};
+  for (const id of positionableIds) {
+    if (byNode[id]) merged[id] = byNode[id];
+  }
+
+  for (const id of positionableIds) {
+    if (sessionPositions[id]) merged[id] = sessionPositions[id];
+  }
+
+  return merged;
+}
+
 function loadAllPositions() {
   try {
     return JSON.parse(localStorage.getItem(POSITIONS_STORAGE_KEY) || '{}');
@@ -211,20 +277,252 @@ function saveAllPositions(store) {
   localStorage.setItem(POSITIONS_STORAGE_KEY, JSON.stringify(store));
 }
 
-function getStoredPositions(diagramKey) {
+function setStoredPositions(diagramKey, positions, positionableIds = Object.keys(positions)) {
   const store = loadAllPositions();
-  return store[hashString(diagramKey)] || {};
+  if (!store.byNode) store.byNode = {};
+
+  for (const id of positionableIds) {
+    const pos = positions[id];
+    if (pos) {
+      store.byNode[id] = pos;
+      sessionPositions[id] = pos;
+    }
+  }
+
+  const structuralKey = structuralDiagramKey(diagramKey);
+  store[structuralKey] = { ...(store[structuralKey] || {}), ...positions };
+  saveAllPositions(store);
 }
 
-function setStoredPositions(diagramKey, positions) {
+function clearStoredPositions(diagramKey, positionableIds) {
   const store = loadAllPositions();
-  const key = hashString(diagramKey);
-  if (Object.keys(positions).length === 0) {
-    delete store[key];
-  } else {
-    store[key] = positions;
+  if (store.byNode) {
+    for (const id of positionableIds) {
+      delete store.byNode[id];
+      delete sessionPositions[id];
+    }
   }
+
+  delete store[hashString(diagramKey)];
+  delete store[structuralDiagramKey(diagramKey)];
   saveAllPositions(store);
+}
+
+function getPathAbsoluteRect(pathEl) {
+  const svg = pathEl.ownerSVGElement;
+  if (!svg || typeof pathEl.getBBox !== 'function') return null;
+
+  const box = pathEl.getBBox();
+  const corners = [
+    toSvgRootPoint(svg, pathEl, box.x, box.y),
+    toSvgRootPoint(svg, pathEl, box.x + box.width, box.y),
+    toSvgRootPoint(svg, pathEl, box.x + box.width, box.y + box.height),
+    toSvgRootPoint(svg, pathEl, box.x, box.y + box.height),
+  ];
+  const xs = corners.map((point) => point.x);
+  const ys = corners.map((point) => point.y);
+
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
+}
+
+function mergeBounds(bounds, rect) {
+  if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.width)) return bounds;
+
+  const next = bounds ?? {
+    minX: rect.x,
+    minY: rect.y,
+    maxX: rect.x + rect.width,
+    maxY: rect.y + rect.height,
+  };
+
+  next.minX = Math.min(next.minX, rect.x);
+  next.minY = Math.min(next.minY, rect.y);
+  next.maxX = Math.max(next.maxX, rect.x + rect.width);
+  next.maxY = Math.max(next.maxY, rect.y + rect.height);
+  return next;
+}
+
+function parseSubgraphMembership(source) {
+  const membership = new Map();
+  let currentSubgraph = null;
+
+  for (const line of source.split('\n')) {
+    const trimmed = line.trim();
+    const subgraphMatch = /^subgraph\s+([A-Za-z][\w-]*)/i.exec(trimmed);
+    if (subgraphMatch) {
+      currentSubgraph = subgraphMatch[1];
+      membership.set(currentSubgraph, []);
+      continue;
+    }
+
+    if (/^end$/i.test(trimmed)) {
+      currentSubgraph = null;
+      continue;
+    }
+
+    if (!currentSubgraph) continue;
+
+    const nodeDefs = [...trimmed.matchAll(/\b([A-Za-z][\w-]*)\s*(?:\[|\(|\{|-->|---|===|-.->)/g)];
+    for (const match of nodeDefs) {
+      const id = match[1];
+      if (['subgraph', 'end'].includes(id.toLowerCase())) continue;
+      const members = membership.get(currentSubgraph);
+      if (!members.includes(id)) members.push(id);
+    }
+
+    const edgeParts = trimmed.split(/(?:-->|---|===|-.->|<-->|--o|--x)/);
+    for (const part of edgeParts) {
+      const id = part.trim().match(/^([A-Za-z][\w-]*)/)?.[1];
+      if (!id || ['subgraph', 'end'].includes(id.toLowerCase())) continue;
+      const members = membership.get(currentSubgraph);
+      if (!members.includes(id)) members.push(id);
+    }
+  }
+
+  return membership;
+}
+
+function storeClusterDefaults(svg) {
+  svg.querySelectorAll('g.clusters g.cluster').forEach((clusterEl) => {
+    const rect = clusterEl.querySelector(':scope > rect');
+    if (!rect) return;
+
+    clusterEl.dataset.defaultRect = JSON.stringify({
+      x: rect.getAttribute('x'),
+      y: rect.getAttribute('y'),
+      width: rect.getAttribute('width'),
+      height: rect.getAttribute('height'),
+    });
+
+    const label = clusterEl.querySelector('.cluster-label');
+    if (label) {
+      clusterEl.dataset.defaultLabelTransform = label.getAttribute('transform') || '';
+    }
+  });
+
+  if (!svg.dataset.defaultViewBox) {
+    svg.dataset.defaultViewBox = svg.getAttribute('viewBox') || '';
+  }
+}
+
+function restoreClusterDefaults(svg) {
+  svg.querySelectorAll('g.clusters g.cluster').forEach((clusterEl) => {
+    const rect = clusterEl.querySelector(':scope > rect');
+    if (!rect || !clusterEl.dataset.defaultRect) return;
+
+    const defaults = JSON.parse(clusterEl.dataset.defaultRect);
+    rect.setAttribute('x', defaults.x);
+    rect.setAttribute('y', defaults.y);
+    rect.setAttribute('width', defaults.width);
+    rect.setAttribute('height', defaults.height);
+
+    const label = clusterEl.querySelector('.cluster-label');
+    if (label && clusterEl.dataset.defaultLabelTransform) {
+      label.setAttribute('transform', clusterEl.dataset.defaultLabelTransform);
+    }
+  });
+
+  if (svg.dataset.defaultViewBox) {
+    svg.setAttribute('viewBox', svg.dataset.defaultViewBox);
+  }
+}
+
+function resizeClusterToFitNodes(svg, clusterEl, nodeIds, positionables) {
+  const rect = clusterEl.querySelector(':scope > rect');
+  if (!rect || nodeIds.length === 0) return;
+
+  let bounds = null;
+  for (const id of nodeIds) {
+    const nodeEl = positionables.get(id);
+    if (!nodeEl?.classList.contains('node')) continue;
+    bounds = mergeBounds(bounds, getAbsoluteRect(nodeEl));
+  }
+
+  if (!bounds) return;
+
+  bounds.minX -= CLUSTER_PADDING;
+  bounds.minY -= CLUSTER_PADDING;
+  bounds.maxX += CLUSTER_PADDING;
+  bounds.maxY += CLUSTER_PADDING;
+
+  if (clusterEl.dataset.defaultRect) {
+    const defaults = JSON.parse(clusterEl.dataset.defaultRect);
+    const defaultTopLeft = toSvgRootPoint(svg, clusterEl, Number(defaults.x), Number(defaults.y));
+    const defaultBottomRight = toSvgRootPoint(
+      svg,
+      clusterEl,
+      Number(defaults.x) + Number(defaults.width),
+      Number(defaults.y) + Number(defaults.height),
+    );
+    bounds = mergeBounds(bounds, {
+      x: defaultTopLeft.x,
+      y: defaultTopLeft.y,
+      width: defaultBottomRight.x - defaultTopLeft.x,
+      height: defaultBottomRight.y - defaultTopLeft.y,
+    });
+  }
+
+  const topLeft = fromSvgRootPoint(svg, clusterEl, bounds.minX, bounds.minY);
+  const bottomRight = fromSvgRootPoint(svg, clusterEl, bounds.maxX, bounds.maxY);
+  const width = Math.max(bottomRight.x - topLeft.x, 1);
+  const height = Math.max(bottomRight.y - topLeft.y, 1);
+
+  rect.setAttribute('x', String(topLeft.x));
+  rect.setAttribute('y', String(topLeft.y));
+  rect.setAttribute('width', String(width));
+  rect.setAttribute('height', String(height));
+
+  const label = clusterEl.querySelector('.cluster-label');
+  if (label) {
+    setTranslate(label, topLeft.x + width / 2, topLeft.y);
+  }
+}
+
+function resizeSubgraphContainers(svg, positionables, diagramKey) {
+  const membership = parseSubgraphMembership(diagramKey);
+  membership.forEach((nodeIds, clusterId) => {
+    const clusterEl = positionables.get(clusterId);
+    if (!clusterEl?.classList.contains('cluster')) return;
+    resizeClusterToFitNodes(svg, clusterEl, nodeIds, positionables);
+  });
+}
+
+function expandSvgViewBox(svg) {
+  let bounds = null;
+
+  svg.querySelectorAll('g.node').forEach((el) => {
+    bounds = mergeBounds(bounds, getAbsoluteRect(el));
+  });
+
+  svg.querySelectorAll('g.cluster > rect').forEach((rect) => {
+    bounds = mergeBounds(bounds, getAbsoluteRect(rect));
+  });
+
+  svg.querySelectorAll('path.flowchart-link').forEach((pathEl) => {
+    bounds = mergeBounds(bounds, getPathAbsoluteRect(pathEl));
+  });
+
+  if (!bounds) return;
+
+  const x = bounds.minX - VIEWBOX_PADDING;
+  const y = bounds.minY - VIEWBOX_PADDING;
+  const width = bounds.maxX - bounds.minX + VIEWBOX_PADDING * 2;
+  const height = bounds.maxY - bounds.minY + VIEWBOX_PADDING * 2;
+
+  svg.setAttribute('viewBox', `${x} ${y} ${width} ${height}`);
+  svg.setAttribute('width', String(width));
+  svg.setAttribute('height', String(height));
+}
+
+function syncManualLayout(svg, positionables, edgeLayout, diagramKey) {
+  resizeSubgraphContainers(svg, positionables, diagramKey);
+  rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+  expandSvgViewBox(svg);
 }
 
 function collectPositionables(svg) {
@@ -348,6 +646,7 @@ function applyPositions(positionables, positions) {
 let activeController = null;
 
 export function teardownNodePositioning() {
+  captureSessionPositions(activeController?.positionables);
   activeController?.destroy();
   activeController = null;
 }
@@ -375,7 +674,9 @@ export function setupNodePositioning({
   }
 
   panelEl.classList.remove('hidden');
+  previewWrap.dataset.manualPositions = 'true';
 
+  storeClusterDefaults(svg);
   bindFlowchartEdges(svg, positionables, diagramKey);
 
   positionables.forEach((el) => {
@@ -385,16 +686,17 @@ export function setupNodePositioning({
     el.classList.add('positionable-node');
   });
 
-  const stored = getStoredPositions(diagramKey);
+  const stored = resolveStoredPositions(diagramKey, [...positionables.keys()]);
   if (Object.keys(stored).length > 0) {
     applyPositions(positionables, stored);
   }
 
-  rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+  syncManualLayout(svg, positionables, edgeLayout, diagramKey);
 
   const controller = {
     positionables,
     destroy() {
+      previewWrap.removeAttribute('data-manual-positions');
       previewWrap.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
@@ -406,7 +708,8 @@ export function setupNodePositioning({
   let dragState = null;
 
   function persistPositions() {
-    setStoredPositions(diagramKey, readPositions(positionables));
+    const positions = readPositions(positionables);
+    setStoredPositions(diagramKey, positions, [...positionables.keys()]);
   }
 
   function syncFromNode(id) {
@@ -423,7 +726,7 @@ export function setupNodePositioning({
     const el = positionables.get(id);
     if (!el) return;
     setTranslate(el, x, y);
-    rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+    syncManualLayout(svg, positionables, edgeLayout, diagramKey);
     syncFromNode(id);
     persistPositions();
   }
@@ -442,7 +745,8 @@ export function setupNodePositioning({
   }
 
   function onReset() {
-    setStoredPositions(diagramKey, {});
+    clearStoredPositions(diagramKey, [...positionables.keys()]);
+    restoreClusterDefaults(svg);
     positionables.forEach((el, id) => {
       const row = panelEl.querySelector(`.position-row[data-node-id="${CSS.escape(id)}"]`);
       if (!row) return;
@@ -450,9 +754,8 @@ export function setupNodePositioning({
       const y = Number(row.dataset.defaultY);
       setTranslate(el, x, y);
     });
-    rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+    syncManualLayout(svg, positionables, edgeLayout, diagramKey);
     renderPanel();
-    persistPositions();
   }
 
   function renderPanel() {
@@ -532,7 +835,7 @@ export function setupNodePositioning({
       syncFromNode(item.id);
     });
 
-    rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+    syncManualLayout(svg, positionables, edgeLayout, diagramKey);
   }
 
   function onPointerUp(event) {
