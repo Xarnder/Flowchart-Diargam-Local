@@ -1,11 +1,25 @@
 import mermaid from 'mermaid';
+import {
+  applyDistinctEdgeStyles,
+  BLOCK_LAYOUTS,
+  EDGE_LAYOUTS,
+  enhanceFlowchartSource,
+  isFlowchartDiagram,
+  resolveLayoutOptions,
+} from './edgeStyling.js';
+import { setupNodePositioning, teardownNodePositioning } from './nodePositioning.js';
 import './style.css';
 
 const MAX_CHARS = 50_000;
 const DEBOUNCE_MS = 350;
 const STORAGE_KEY = 'mermaid-studio-source';
 const THEME_STORAGE_KEY = 'mermaid-studio-export-theme';
+const EDGE_LAYOUT_STORAGE_KEY = 'mermaid-studio-edge-layout';
+const BLOCK_LAYOUT_STORAGE_KEY = 'mermaid-studio-block-layout';
+const MANUAL_POSITIONS_STORAGE_KEY = 'mermaid-studio-manual-positions';
 const DEFAULT_THEME = 'dark';
+const DEFAULT_EDGE_LAYOUT = EDGE_LAYOUTS.curvy;
+const DEFAULT_BLOCK_LAYOUT = BLOCK_LAYOUTS.original;
 
 const EXPORT_THEMES = {
   light: { label: 'Light', mermaid: 'default', background: '#ffffff' },
@@ -78,9 +92,22 @@ let renderCounter = 0;
 let debounceTimer = null;
 let lastSource = '';
 let currentExportTheme = DEFAULT_THEME;
+let currentEdgeLayout = DEFAULT_EDGE_LAYOUT;
+let currentBlockLayout = DEFAULT_BLOCK_LAYOUT;
+
+function getRenderLayoutOptions(els) {
+  return resolveLayoutOptions({
+    edgeLayout: els.edgeLayout?.value ?? DEFAULT_EDGE_LAYOUT,
+    blockLayout: els.blockLayout?.value ?? DEFAULT_BLOCK_LAYOUT,
+  });
+}
 
 /** Native SVG text labels — HTML foreignObject labels break in saved SVG / PNG export. */
-function initMermaid(themeName) {
+function initMermaid(themeName, layoutOptions) {
+  const layout = resolveLayoutOptions(layoutOptions);
+  const useCurvyCurve = layout.edgeLayout === EDGE_LAYOUTS.curvy;
+  const useSpacedBlocks = layout.blockLayout === BLOCK_LAYOUTS.spaced;
+
   mermaid.initialize({
     startOnLoad: false,
     maxTextSize: MAX_CHARS,
@@ -90,6 +117,8 @@ function initMermaid(themeName) {
     fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif',
     flowchart: {
       htmlLabels: false,
+      curve: useCurvyCurve ? 'basis' : 'linear',
+      ...(useSpacedBlocks ? { padding: 16, nodeSpacing: 50, rankSpacing: 50 } : {}),
     },
     sequence: {
       actorFontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif',
@@ -136,6 +165,23 @@ function buildUi() {
         ${themeOptions}
       </select>
 
+      <label class="field-label" for="edge-layout">Edge layout</label>
+      <select id="edge-layout" title="Curved uses smooth lines; Straight uses classic orthogonal routing">
+        <option value="curvy" selected>Curved</option>
+        <option value="straight">Straight</option>
+      </select>
+
+      <label class="field-label" for="block-layout">Block layout</label>
+      <select id="block-layout" title="Original keeps classic Mermaid node positions; Spaced uses wider layout">
+        <option value="original" selected>Original</option>
+        <option value="spaced">Spaced</option>
+      </select>
+
+      <label class="checkbox-label" for="manual-positions" title="Drag blocks or set X/Y coordinates; arrows follow automatically">
+        <input type="checkbox" id="manual-positions" />
+        Position blocks
+      </label>
+
       <label class="field-label" for="scale-input">PNG scale</label>
       <input type="number" id="scale-input" min="1" max="4" step="1" value="2" title="Higher = sharper PNG" />
 
@@ -151,13 +197,21 @@ function buildUi() {
         <textarea id="editor" spellcheck="false" placeholder="Paste Mermaid code here…"></textarea>
       </section>
 
-      <section class="panel">
+      <section class="panel panel-preview">
         <div class="panel-header">
           <span>Preview</span>
           <span id="preview-status"><span class="status-dot"></span>Waiting</span>
         </div>
         <div id="preview-wrap" data-theme="${DEFAULT_THEME}">
           <p class="preview-placeholder">Live preview appears here as you type.</p>
+        </div>
+        <div id="position-panel" class="position-panel hidden">
+          <div class="position-panel-header">
+            <span>Block positions</span>
+            <span class="position-hint">Drag blocks in preview or edit X/Y</span>
+            <button type="button" id="btn-reset-positions">Reset positions</button>
+          </div>
+          <div class="position-rows"></div>
         </div>
       </section>
     </div>
@@ -182,6 +236,11 @@ function getElements() {
     btnRender: document.getElementById('btn-render'),
     exampleSelect: document.getElementById('example-select'),
     exportTheme: document.getElementById('export-theme'),
+    edgeLayout: document.getElementById('edge-layout'),
+    blockLayout: document.getElementById('block-layout'),
+    manualPositions: document.getElementById('manual-positions'),
+    positionPanel: document.getElementById('position-panel'),
+    btnResetPositions: document.getElementById('btn-reset-positions'),
     scaleInput: document.getElementById('scale-input'),
   };
 }
@@ -228,16 +287,40 @@ function applyPreviewSurface(wrap, themeKey) {
   wrap.dataset.theme = themeKey;
 }
 
-async function renderDiagram(source, els, themeKey = currentExportTheme) {
+function mountNodePositioning(text, els, layoutOptions) {
+  const svg = els.previewWrap.querySelector('svg');
+  const enabled = Boolean(els.manualPositions?.checked) && isFlowchartDiagram(text);
+
+  setupNodePositioning({
+    previewWrap: els.previewWrap,
+    svg,
+    diagramKey: text,
+    edgeLayout: layoutOptions.edgeLayout,
+    enabled,
+    panelEl: els.positionPanel,
+    resetBtn: els.btnResetPositions,
+  });
+}
+
+async function renderDiagram(
+  source,
+  els,
+  themeKey = currentExportTheme,
+  layoutOptions = getRenderLayoutOptions(els),
+) {
   const text = source.trim();
   lastSource = text;
   currentExportTheme = themeKey;
+  currentEdgeLayout = layoutOptions.edgeLayout;
+  currentBlockLayout = layoutOptions.blockLayout;
 
   applyPreviewSurface(els.previewWrap, themeKey);
-  initMermaid(getExportThemeConfig(themeKey).mermaid);
+  initMermaid(getExportThemeConfig(themeKey).mermaid, layoutOptions);
 
   if (!text) {
     setExportButtonsEnabled(els, false);
+    teardownNodePositioning();
+    els.positionPanel?.classList.add('hidden');
     els.previewWrap.innerHTML =
       '<p class="preview-placeholder">Paste Mermaid code in the editor to see a preview.</p>';
     setStatus(els.previewStatus, 'idle', 'Empty');
@@ -258,8 +341,14 @@ async function renderDiagram(source, els, themeKey = currentExportTheme) {
   setStatus(els.previewStatus, 'idle', 'Rendering…');
 
   try {
-    const { svg } = await mermaid.render(id, text);
+    const renderSource = enhanceFlowchartSource(text, layoutOptions);
+    const { svg } = await mermaid.render(id, renderSource);
     els.previewWrap.innerHTML = svg;
+
+    const manualPositions = Boolean(els.manualPositions?.checked);
+    const svgEl = els.previewWrap.querySelector('svg');
+    applyDistinctEdgeStyles(svgEl, { ...layoutOptions, manualPositions });
+    mountNodePositioning(text, els, layoutOptions);
     setExportButtonsEnabled(els, true);
     setStatus(els.previewStatus, 'ok', `${getExportThemeConfig(themeKey).label} preview`);
     return true;
@@ -334,8 +423,13 @@ function prepareLiveSvgForExport(previewWrap, backgroundColor) {
 }
 
 async function getExportSvg(source, themeKey, previewWrap, els) {
+  const layoutOptions = getRenderLayoutOptions(els);
   const needsRender =
-    themeKey !== currentExportTheme || source.trim() !== lastSource.trim() || !previewWrap.querySelector('svg');
+    themeKey !== currentExportTheme ||
+    layoutOptions.edgeLayout !== currentEdgeLayout ||
+    layoutOptions.blockLayout !== currentBlockLayout ||
+    source.trim() !== lastSource.trim() ||
+    !previewWrap.querySelector('svg');
 
   if (needsRender) {
     const ok = await renderDiagram(source, els, themeKey);
@@ -410,12 +504,22 @@ function timestampFilename(ext, themeKey) {
 function bindEvents(els) {
   const saved = localStorage.getItem(STORAGE_KEY);
   const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  const savedEdgeLayout = localStorage.getItem(EDGE_LAYOUT_STORAGE_KEY);
+  const savedBlockLayout = localStorage.getItem(BLOCK_LAYOUT_STORAGE_KEY);
+  const savedManualPositions = localStorage.getItem(MANUAL_POSITIONS_STORAGE_KEY);
   els.exportTheme.value =
     savedTheme && EXPORT_THEMES[savedTheme] ? savedTheme : DEFAULT_THEME;
+  els.edgeLayout.value =
+    savedEdgeLayout && EDGE_LAYOUTS[savedEdgeLayout] ? savedEdgeLayout : DEFAULT_EDGE_LAYOUT;
+  els.blockLayout.value =
+    savedBlockLayout && BLOCK_LAYOUTS[savedBlockLayout]
+      ? savedBlockLayout
+      : DEFAULT_BLOCK_LAYOUT;
+  els.manualPositions.checked = savedManualPositions === '1';
 
   els.editor.value = saved || DEFAULT_SOURCE;
   updateCharCount(els.charCount, els.editor.value.length);
-  renderDiagram(els.editor.value, els, els.exportTheme.value);
+  renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
 
   els.editor.addEventListener('input', () => {
     const { value } = els.editor;
@@ -426,7 +530,22 @@ function bindEvents(els) {
 
   els.exportTheme.addEventListener('change', () => {
     localStorage.setItem(THEME_STORAGE_KEY, els.exportTheme.value);
-    renderDiagram(els.editor.value, els, els.exportTheme.value);
+    renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
+  });
+
+  els.edgeLayout.addEventListener('change', () => {
+    localStorage.setItem(EDGE_LAYOUT_STORAGE_KEY, els.edgeLayout.value);
+    renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
+  });
+
+  els.blockLayout.addEventListener('change', () => {
+    localStorage.setItem(BLOCK_LAYOUT_STORAGE_KEY, els.blockLayout.value);
+    renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
+  });
+
+  els.manualPositions.addEventListener('change', () => {
+    localStorage.setItem(MANUAL_POSITIONS_STORAGE_KEY, els.manualPositions.checked ? '1' : '0');
+    renderDiagram(els.editor.value, els, els.exportTheme.value, getRenderLayoutOptions(els));
   });
 
   els.btnRender.addEventListener('click', () => {
