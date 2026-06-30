@@ -1,7 +1,7 @@
 /**
  * SVG coordinate helpers for dragging.
- * All pointer input is converted to the root SVG user space, then mapped into
- * each element parent's local space where translate() values live.
+ * Pointer input is converted to root SVG user space (viewBox coordinates).
+ * translate() values live in each element parent's local space.
  */
 
 export function clientToSvg(svg, clientX, clientY) {
@@ -17,21 +17,50 @@ export function clientToSvg(svg, clientX, clientY) {
   return { x: mapped.x, y: mapped.y };
 }
 
-/** Map a root-SVG point into an element parent's local coordinate system. */
-export function rootToParentLocal(svg, parentEl, rootX, rootY) {
-  if (!svg?.createSVGPoint || !parentEl) return { x: rootX, y: rootY };
+/** Map user-space coordinates to the SVG viewport (pixel) space. */
+export function userToViewport(svg, userX, userY) {
+  if (!svg?.createSVGPoint) return { x: userX, y: userY };
 
   const point = svg.createSVGPoint();
-  point.x = rootX;
-  point.y = rootY;
-  const ctm = parentEl.getCTM();
-  if (!ctm) return { x: rootX, y: rootY };
+  point.x = userX;
+  point.y = userY;
+  const ctm = svg.getCTM();
+  if (!ctm) return { x: userX, y: userY };
+
+  const mapped = point.matrixTransform(ctm);
+  return { x: mapped.x, y: mapped.y };
+}
+
+/** Map viewport (pixel) coordinates back to SVG user space. */
+export function viewportToUser(svg, viewportX, viewportY) {
+  if (!svg?.createSVGPoint) return { x: viewportX, y: viewportY };
+
+  const point = svg.createSVGPoint();
+  point.x = viewportX;
+  point.y = viewportY;
+  const ctm = svg.getCTM();
+  if (!ctm) return { x: viewportX, y: viewportY };
 
   const mapped = point.matrixTransform(ctm.inverse());
   return { x: mapped.x, y: mapped.y };
 }
 
-/** Convert a displacement vector from root SVG space into a parent's local space. */
+/** Map a root user-space point into an element parent's local coordinate system. */
+export function rootToParentLocal(svg, parentEl, userX, userY) {
+  if (!svg?.createSVGPoint || !parentEl) return { x: userX, y: userY };
+
+  const inViewport = userToViewport(svg, userX, userY);
+  const point = svg.createSVGPoint();
+  point.x = inViewport.x;
+  point.y = inViewport.y;
+  const ctm = parentEl.getCTM();
+  if (!ctm) return { x: userX, y: userY };
+
+  const mapped = point.matrixTransform(ctm.inverse());
+  return { x: mapped.x, y: mapped.y };
+}
+
+/** Convert a displacement vector from root user space into a parent's local space. */
 export function rootDeltaToParent(svg, parentEl, deltaX, deltaY) {
   const origin = rootToParentLocal(svg, parentEl, 0, 0);
   const shifted = rootToParentLocal(svg, parentEl, deltaX, deltaY);

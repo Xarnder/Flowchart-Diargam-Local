@@ -1,3 +1,5 @@
+import { rootDeltaToParent, viewportToUser } from './svgCoords.js';
+
 /** Padding inside the canvas edge when deriving the initial canvas from content. */
 export const CANVAS_EDGE_PADDING = 24;
 
@@ -231,31 +233,64 @@ export function clampClusterRectToCanvas(rect, canvasBounds) {
 export function clampNodeTranslateToCanvas(svg, el, nextX, nextY, canvasBounds) {
   if (!canvasBounds) return { x: nextX, y: nextY };
 
-  setTranslate(el, nextX, nextY);
-  let rect = getAbsoluteRect(el);
+  const parent = el.parentElement;
   let x = nextX;
   let y = nextY;
 
+  const applyCorrection = (correctionX, correctionY) => {
+    if (correctionX === 0 && correctionY === 0) return;
+    const delta = rootDeltaToParent(svg, parent, correctionX, correctionY);
+    x += delta.dx;
+    y += delta.dy;
+  };
+
+  setTranslate(el, x, y);
+  let rect = getNodeUserSpaceRect(svg, el);
+
   if (rect.x < canvasBounds.x) {
-    x += canvasBounds.x - rect.x;
+    applyCorrection(canvasBounds.x - rect.x, 0);
   }
   if (rect.y < canvasBounds.y) {
-    y += canvasBounds.y - rect.y;
+    applyCorrection(0, canvasBounds.y - rect.y);
   }
 
   setTranslate(el, x, y);
-  rect = getAbsoluteRect(el);
+  rect = getNodeUserSpaceRect(svg, el);
 
   const overflowRight = rect.x + rect.width - (canvasBounds.x + canvasBounds.width);
   if (overflowRight > 0) {
-    x -= overflowRight;
+    applyCorrection(-overflowRight, 0);
   }
   const overflowBottom = rect.y + rect.height - (canvasBounds.y + canvasBounds.height);
   if (overflowBottom > 0) {
-    y -= overflowBottom;
+    applyCorrection(0, -overflowBottom);
   }
 
   return { x, y };
+}
+
+function getNodeUserSpaceRect(svg, el) {
+  const shape =
+    el.querySelector(':scope > rect, :scope > polygon, :scope > circle, :scope > ellipse') || el;
+  return getElementUserSpaceRect(svg, shape);
+}
+
+function getElementUserSpaceRect(svg, el) {
+  const viewportRect = getAbsoluteRect(el);
+  const corners = [
+    viewportToUser(svg, viewportRect.x, viewportRect.y),
+    viewportToUser(svg, viewportRect.x + viewportRect.width, viewportRect.y),
+    viewportToUser(svg, viewportRect.x + viewportRect.width, viewportRect.y + viewportRect.height),
+    viewportToUser(svg, viewportRect.x, viewportRect.y + viewportRect.height),
+  ];
+  const xs = corners.map((point) => point.x);
+  const ys = corners.map((point) => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  const width = Math.max(...xs) - x;
+  const height = Math.max(...ys) - y;
+
+  return { x, y, width, height };
 }
 
 function setTranslate(el, x, y) {

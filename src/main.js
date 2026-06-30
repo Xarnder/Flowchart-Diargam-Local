@@ -17,6 +17,8 @@ import {
 } from './diagramFile.js';
 import {
   captureDiagramLayoutForSave,
+  ensureDiagramCanvasBounds,
+  recalculateDiagramCanvasBounds,
   fitPreviewSvgToContent,
   getActivePositionables,
   importDiagramLayout,
@@ -236,6 +238,8 @@ function buildUi() {
         Canvas size
       </label>
 
+      <button type="button" id="btn-fit-canvas" class="hidden" title="Resize canvas to fit the entire diagram">Fit canvas</button>
+
       <label class="field-label" for="scale-input">PNG scale</label>
       <input type="number" id="scale-input" min="1" max="4" step="1" value="2" title="Higher = sharper PNG" />
 
@@ -339,6 +343,7 @@ function getElements() {
     moveSubgraphs: document.getElementById('move-subgraphs'),
     subgraphResize: document.getElementById('subgraph-resize'),
     canvasSize: document.getElementById('canvas-size'),
+    btnFitCanvas: document.getElementById('btn-fit-canvas'),
     positionPanel: document.getElementById('position-panel'),
     btnResetPositions: document.getElementById('btn-reset-positions'),
     layoutHistoryActions: document.getElementById('layout-history-actions'),
@@ -487,12 +492,13 @@ function refreshLayoutEditMode(els) {
 
   updateNodePositioningEditMode(getLayoutEditMode(els));
 
+  spreadFlowchartEdgeAnchors(svgEl, source, els.edgeLayout.value);
+  ensureDiagramCanvasBounds();
   const customLayout = usesCustomLayoutPreview(els, source);
   normalizePreviewSvgSizing(svgEl, customLayout);
-  if (customLayout) {
+  if (customLayout || diagramHasStoredLayout(source)) {
     fitPreviewSvgToContent(svgEl, getDiagramCanvasBounds(source));
   }
-  spreadFlowchartEdgeAnchors(svgEl, source, els.edgeLayout.value);
 }
 
 function isLayoutEditingActive(els) {
@@ -508,6 +514,13 @@ function syncLayoutModeControls(els) {
       control.checked = false;
     }
   });
+
+  const canFitCanvas =
+    isFlowchart && supportsBlockPositioning(els.editor?.value || '') && Boolean(els.previewCanvas?.querySelector('svg'));
+  els.btnFitCanvas?.classList.toggle('hidden', !isFlowchart || !supportsBlockPositioning(els.editor?.value || ''));
+  if (els.btnFitCanvas) {
+    els.btnFitCanvas.disabled = !canFitCanvas;
+  }
 
   normalizeSavedLayoutEditModes(els);
 
@@ -883,10 +896,11 @@ async function renderDiagram(
     });
     syncLayoutModeControls(els);
     if (svgEl && supportsBlockPositioning(text)) {
-      if (customLayout) {
+      spreadFlowchartEdgeAnchors(svgEl, text, layoutOptions.edgeLayout);
+      ensureDiagramCanvasBounds();
+      if (customLayout || diagramHasStoredLayout(text)) {
         fitPreviewSvgToContent(svgEl, getDiagramCanvasBounds(text));
       }
-      spreadFlowchartEdgeAnchors(svgEl, text, layoutOptions.edgeLayout);
     }
     setExportButtonsEnabled(els, true);
     setStatus(els.previewStatus, 'ok', `${getExportThemeConfig(themeKey).label} preview`);
@@ -911,20 +925,26 @@ function parseSvgDimensions(svgEl) {
   if (viewBox) {
     const parts = viewBox.split(/[\s,]+/).map(Number);
     if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
-      return { width: parts[2], height: parts[3], viewBox };
+      return {
+        x: parts[0],
+        y: parts[1],
+        width: parts[2],
+        height: parts[3],
+        viewBox,
+      };
     }
   }
 
   const width = parseFloat(String(svgEl.getAttribute('width') || '800').replace(/px$/, ''));
   const height = parseFloat(String(svgEl.getAttribute('height') || '600').replace(/px$/, ''));
-  return { width, height, viewBox: `0 0 ${width} ${height}` };
+  return { x: 0, y: 0, width, height, viewBox: `0 0 ${width} ${height}` };
 }
 
 /** Insert background after style/defs so it does not cover content. */
-function insertBackgroundRect(svgEl, backgroundColor, width, height) {
+function insertBackgroundRect(svgEl, backgroundColor, x, y, width, height) {
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-  bg.setAttribute('x', '0');
-  bg.setAttribute('y', '0');
+  bg.setAttribute('x', String(x));
+  bg.setAttribute('y', String(y));
   bg.setAttribute('width', String(width));
   bg.setAttribute('height', String(height));
   bg.setAttribute('fill', backgroundColor);
@@ -946,7 +966,7 @@ function prepareLiveSvgForExport(previewCanvas, backgroundColor) {
   }
 
   const cloned = liveSvg.cloneNode(true);
-  const { width, height, viewBox } = parseSvgDimensions(liveSvg);
+  const { x, y, width, height, viewBox } = parseSvgDimensions(liveSvg);
 
   cloned.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   cloned.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
@@ -955,7 +975,7 @@ function prepareLiveSvgForExport(previewCanvas, backgroundColor) {
   cloned.setAttribute('viewBox', viewBox);
 
   if (backgroundColor) {
-    insertBackgroundRect(cloned, backgroundColor, width, height);
+    insertBackgroundRect(cloned, backgroundColor, x, y, width, height);
   }
 
   stripPositioningEditorArtifacts(cloned);
@@ -1247,6 +1267,17 @@ function bindEvents(els) {
     }
     scheduleDiagramSave(els);
     refreshLayoutEditMode(els);
+  });
+
+  els.btnFitCanvas?.addEventListener('click', () => {
+    const svgEl = els.previewCanvas.querySelector('svg');
+    if (!svgEl || !supportsBlockPositioning(els.editor.value)) return;
+
+    recalculateDiagramCanvasBounds();
+    const customLayout = usesCustomLayoutPreview(els, els.editor.value);
+    normalizePreviewSvgSizing(svgEl, customLayout);
+    fitPreviewSvgToContent(svgEl, getDiagramCanvasBounds(els.editor.value));
+    scheduleDiagramSave(els);
   });
 
   els.btnRender.addEventListener('click', () => {

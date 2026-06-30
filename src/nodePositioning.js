@@ -25,6 +25,7 @@ import {
   parseTranslate,
   rootDeltaToParent,
   rootToParentLocal,
+  viewportToUser,
 } from './svgCoords.js';
 
 const POSITIONS_STORAGE_KEY = 'mermaid-studio-node-positions';
@@ -273,6 +274,7 @@ function syncClusterHandleVisibility(clusterEl) {
 export function stripPositioningEditorArtifacts(svgEl) {
   if (!svgEl) return;
   svgEl.querySelectorAll('.cluster-handles').forEach((el) => el.remove());
+  removeCanvasOverlay(svgEl);
 }
 
 function computeResizedClusterRect(start, handle, dx, dy) {
@@ -747,18 +749,36 @@ function computeContentBounds(svg) {
   let bounds = null;
 
   svg.querySelectorAll('g.node, g.cluster').forEach((el) => {
-    bounds = mergeBounds(bounds, getAbsoluteRect(el));
+    bounds = mergeBounds(bounds, toUserSpaceBounds(svg, getAbsoluteRect(el)));
   });
 
   svg.querySelectorAll('g.edgeLabel, .edgeLabel').forEach((el) => {
-    bounds = mergeBounds(bounds, getAbsoluteRect(el));
+    bounds = mergeBounds(bounds, toUserSpaceBounds(svg, getAbsoluteRect(el)));
   });
 
   svg.querySelectorAll('path.flowchart-link, g.edgePaths path, path.relation').forEach((pathEl) => {
-    bounds = mergeBounds(bounds, getPathAbsoluteRect(pathEl));
+    bounds = mergeBounds(bounds, toUserSpaceBounds(svg, getPathAbsoluteRect(pathEl)));
   });
 
   return bounds;
+}
+
+function toUserSpaceBounds(svg, viewportRect) {
+  if (!viewportRect || !svg) return null;
+
+  const corners = [
+    viewportToUser(svg, viewportRect.x, viewportRect.y),
+    viewportToUser(svg, viewportRect.x + viewportRect.width, viewportRect.y),
+    viewportToUser(svg, viewportRect.x + viewportRect.width, viewportRect.y + viewportRect.height),
+    viewportToUser(svg, viewportRect.x, viewportRect.y + viewportRect.height),
+  ];
+
+  return {
+    x: Math.min(...corners.map((point) => point.x)),
+    y: Math.min(...corners.map((point) => point.y)),
+    width: Math.max(...corners.map((point) => point.x)) - Math.min(...corners.map((point) => point.x)),
+    height: Math.max(...corners.map((point) => point.y)) - Math.min(...corners.map((point) => point.y)),
+  };
 }
 
 function captureInitialCanvasBounds(svg, mermaidViewBoxBounds) {
@@ -1350,6 +1370,14 @@ export function getDiagramCanvasBounds(diagramKey) {
   return resolveStoredCanvasBounds(diagramKey);
 }
 
+export function ensureDiagramCanvasBounds() {
+  return activeController?.ensureCanvasBounds?.() ?? null;
+}
+
+export function recalculateDiagramCanvasBounds() {
+  return activeController?.recalculateCanvas?.() ?? null;
+}
+
 export function updateNodePositioningEditMode(editMode) {
   activeController?.setEditMode?.(editMode);
 }
@@ -1495,9 +1523,7 @@ export function setupNodePositioning({
     applyManualClusterRects(positionables, storedClusters);
   }
 
-  if (!canvasBounds) {
-    canvasBounds = resolveCanvasBounds(diagramKey, svg, mermaidViewBoxBounds);
-  }
+  // Initial canvas capture is deferred until after edge routing (see ensureDiagramCanvasBounds).
 
   hasStoredLayout = hasStoredPositions || Boolean(canvasBounds);
 
@@ -1575,6 +1601,34 @@ export function setupNodePositioning({
   const controller = {
     positionables,
     getCanvasBounds: () => (canvasBounds ? { ...canvasBounds } : null),
+    ensureCanvasBounds() {
+      if (canvasBounds) return canvasBounds;
+
+      canvasBounds = captureInitialCanvasBounds(svg, mermaidViewBoxBounds);
+      if (canvasBounds) {
+        setStoredCanvasBounds(diagramKey, canvasBounds);
+        applyCanvasToSvg(svg, canvasBounds);
+        applyEditModeState(currentEditMode);
+        hasStoredLayout = true;
+        previewWrap.dataset.customLayout = 'true';
+        persistPositions();
+      }
+      return canvasBounds;
+    },
+    recalculateCanvas() {
+      const before = snapshotLayout();
+      spreadFlowchartEdgeAnchors(svg, diagramKey, edgeLayout);
+      canvasBounds = captureInitialCanvasBounds(svg, boundsFromSvgViewBox(svg));
+      if (canvasBounds) {
+        setStoredCanvasBounds(diagramKey, canvasBounds);
+        applyCanvasToSvg(svg, canvasBounds);
+        applyEditModeState(currentEditMode);
+        rerouteFlowchartEdges(svg, positionables, edgeLayout, diagramKey);
+      }
+      commitLayoutChange(before);
+      persistPositions();
+      return canvasBounds;
+    },
     setEditMode(nextEditMode) {
       applyEditModeState(nextEditMode);
     },
