@@ -61,6 +61,14 @@ const ENHANCEMENT_START = '%% edge-enhancements-start';
 const ENHANCEMENT_END = '%% edge-enhancements-end';
 
 const FLOWCHART_HEADER = /^(?:---[\s\S]*?---\s*\n)?(?:graph|flowchart)\s/im;
+const CLASS_DIAGRAM_HEADER = /^(?:---[\s\S]*?---\s*\n)?classDiagram\s/im;
+
+/** Mermaid class-diagram relation operators, longest first. */
+const CLASS_LINK_OPERATOR =
+  /(?:<\|\.\.|\.\.\|>|\|\}--|<\|--|\*\-\-|\*--\>|o\-\-|o\-\-|--\*>|\*--|--\|>|-->|--|\.\.>)/g;
+
+const CLASS_SKIP_LINE =
+  /^\s*(?:%%|<<\s*include\s*|direction\s|namespace\s|classDef\s|cssClass\s|style\s|click\s|accTitle|accDescr)/i;
 
 /** Mermaid link operators, longest matches first. */
 const LINK_OPERATOR =
@@ -81,6 +89,42 @@ function stripEnhancements(source) {
 
 export function isFlowchartDiagram(source) {
   return FLOWCHART_HEADER.test(source.trimStart());
+}
+
+export function isClassDiagram(source) {
+  return CLASS_DIAGRAM_HEADER.test(source.trimStart());
+}
+
+export function supportsBlockPositioning(source) {
+  return isFlowchartDiagram(source) || isClassDiagram(source);
+}
+
+function isClassEdgeLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || CLASS_SKIP_LINE.test(trimmed) || /^class\s/i.test(trimmed)) return false;
+  CLASS_LINK_OPERATOR.lastIndex = 0;
+  return CLASS_LINK_OPERATOR.test(trimmed);
+}
+
+export function parseClassDiagramEdges(source) {
+  const edges = [];
+
+  for (const line of source.split('\n')) {
+    if (!isClassEdgeLine(line)) continue;
+
+    const cleaned = line.replace(/:\s*[^:\n]+$/g, '');
+    const parts = cleaned.split(CLASS_LINK_OPERATOR);
+    const operators = cleaned.match(CLASS_LINK_OPERATOR) || [];
+    if (operators.length === 0 || parts.length < 2) continue;
+
+    for (let i = 0; i < operators.length; i += 1) {
+      const start = extractNodeId(parts[i], 'last');
+      const end = extractNodeId(parts[i + 1], 'first');
+      if (start && end) edges.push({ start, end });
+    }
+  }
+
+  return edges;
 }
 
 function isEdgeLine(line) {
